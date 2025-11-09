@@ -4,6 +4,8 @@ import sys
 import time
 import csv
 import io
+import os
+from datetime import datetime
 from typing import Dict, List, Optional, Any
 
 # 設置常量
@@ -43,11 +45,11 @@ timeout = 20
 ENABLE_FILTER = True  # True = 啟用篩選，False = 不篩選（顯示全部股票）
 STOCK_CODES_TO_FILTER = [
      '0050', '2330', '2317',
-     '2383', '2408', '2449', '2454', '2603', '3231', '3264', '6669'
+     '2383', '2408', '8229', '2449', '2454', '2603', '3231', '3264', '6669'
  ]  # 範例：元大台灣50、台積電、鴻海、 台光電, 南亞科, 京元電子, 聯發科, 長榮, 緯創, 世芯
 
 # 排序設定
-SORT_BY_CHANGE = True  # True = 按照漲跌價差遞減排序，False = 不排序（保持原始順序）
+SORT_BY_CHANGE = False  # True = 按照漲跌價差遞減排序，False = 不排序（保持原始順序）
 SORT_REVERSE = True    # True = 遞減排序（漲幅最大在前），False = 遞增排序（跌幅最大在前）
     
 # ============================================
@@ -60,15 +62,25 @@ try:
     from funtion.stock_filter import filter_stocks_by_codes, sort_by_change
 except ImportError:
     # 如果導入失敗，嘗試相對路徑
-    import os
-    sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'funtion'))
-    from stock_filter import filter_stocks_by_codes, sort_by_change
+    # (當作主程式執行時，__file__ 會是 '盤後資訊/stock_day.py'，
+    # os.path.dirname(__file__) 是 '盤後資訊'
+    # '..' 會往上一層到專案根目錄)
+    sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
+    from funtion.stock_filter import filter_stocks_by_codes, sort_by_change
 
 # --- 1. 設置日誌 ---
+# (日誌僅寫入檔案，不輸出到控制台)
+# 決定日誌檔案路徑 (存在專案根目錄下)
+script_dir = os.path.dirname(__file__)
+project_root = os.path.abspath(os.path.join(script_dir, '..'))
+log_dir = os.path.join(project_root, 'logs', 'csv_log')
+os.makedirs(log_dir, exist_ok=True)
+log_file = os.path.join(log_dir, f'stock_day_{datetime.now().strftime("%Y%m%d")}.log')
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(module)s - %(message)s',
-    handlers=[logging.StreamHandler(sys.stdout)]
+    handlers=[logging.FileHandler(log_file, encoding='utf-8')]
 )
 
 # --- 2. 抓取全市場資料 ---
@@ -175,7 +187,7 @@ def fetch_twse_market_day_all_csv() -> Optional[List[Dict[str, Any]]]:
                 change_str = stock_data.get('漲跌價差', '').strip()
                 
                 # 嘗試轉換為數值並計算昨收價
-                if close_price_str and change_str:
+                if close_price_str and change_str and close_price_str != '--' and change_str != '--':
                     try:
                         # 移除可能的逗號分隔符（例如：1,234.56）
                         close_price = float(close_price_str.replace(',', ''))
@@ -191,7 +203,7 @@ def fetch_twse_market_day_all_csv() -> Optional[List[Dict[str, Any]]]:
                         logging.debug(f"[計算昨收價] 無法計算，收盤價: {close_price_str}, 漲跌價差: {change_str}, 錯誤: {e}")
                         stock_data['昨收價'] = ''
                 else:
-                    # 如果缺少必要欄位，設為空值
+                    # 如果缺少必要欄位或值為 '--'，設為空值
                     stock_data['昨收價'] = ''
             except Exception as e:
                 # 處理其他可能的錯誤
@@ -224,37 +236,117 @@ def fetch_twse_market_day_all_csv() -> Optional[List[Dict[str, Any]]]:
         
     return None
 
+# --- 3. [新] 儲存資料到 CSV ---
+def save_data_to_csv(data_list: List[Dict[str, Any]], output_dir: str):
+    """
+    將處理過的資料儲存為 CSV 檔案。
+    檔案將儲存在指定的 output_dir 中，並以當天日期命名。
+    """
+    if not data_list:
+        logging.warning("[CSV Save] 沒有資料可儲存。")
+        return
 
-# --- 3. 執行主程式 ---
+    try:
+        # --- 3.1 決定檔案名稱 ---
+        # 嘗試從資料中獲取日期
+        date_str = data_list[0].get('日期', '').strip()
+        if date_str:
+            # 轉換民國年 (e.g., 113/11/08) 為西元年 (e.g., 2024-11-08)
+            try:
+                parts = date_str.split('/')
+                roc_year = int(parts[0])
+                month = int(parts[1])
+                day = int(parts[2])
+                year = roc_year + 1911
+                file_date_str = f"{year}-{month:02d}-{day:02d}"
+            except Exception:
+                # 如果日期格式解析失敗，退回使用今天的日期
+                logging.warning(f"[CSV Save] 無法解析資料日期 '{date_str}'，將使用今天日期命名。")
+                file_date_str = datetime.now().strftime('%Y-%m-%d')
+        else:
+            # 如果沒有日期欄位，使用今天的日期
+            logging.warning("[CSV Save] 資料中無日期欄位，將使用今天日期命名。")
+            file_date_str = datetime.now().strftime('%Y-%m-%d')
+
+        filename = f"stock_day_{file_date_str}.csv"
+        
+        # --- 3.2 建立資料夾並組合路徑 ---
+        os.makedirs(output_dir, exist_ok=True)
+        filepath = os.path.join(output_dir, filename)
+
+        # --- 3.3 寫入 CSV ---
+        # 取得所有欄位名稱 (以第一筆資料為準)
+        headers = list(data_list[0].keys())
+        
+        logging.info(f"[CSV Save] 準備寫入資料至: {filepath}")
+        
+        with open(filepath, 'w', newline='', encoding='utf-8-sig') as f:
+            # 使用 DictWriter 寫入字典列表
+            writer = csv.DictWriter(f, fieldnames=headers)
+            
+            # 寫入標頭
+            writer.writeheader()
+            
+            # 寫入所有資料
+            writer.writerows(data_list)
+
+        logging.info(f"[CSV Save] ✓ 成功將 {len(data_list)} 筆資料儲存至 {filepath}")
+
+    except csv.Error as csv_err:
+        logging.error(f"[CSV Save Error] 寫入 CSV 失敗: {csv_err}")
+    except IOError as io_err:
+        logging.error(f"[CSV Save Error] 檔案寫入錯誤: {io_err}")
+    except Exception as e:
+        logging.error(f"[CSV Save Error] 儲存 CSV 時發生未預期錯誤: {e}", exc_info=True)
+
+
+# --- 4. 執行主程式 ---
 if __name__ == "__main__":
     
     # ============================================
     # 執行查詢
     # ============================================
-    
+    logging.info(f"------------------------------------------------------------------------------------------------")
+    logging.info(f"------------------------------------------------------------------------------------------------")
     logging.info(f"--- 開始抓取全市場資料 ---")
+    
     
     # 調用抓取全市場資料函數
     market_data_list = fetch_twse_market_day_all_csv()
     
     if market_data_list:
-        # --- 3.1 如果有啟用篩選，則進行篩選 ---
+        # --- 4.1 如果有啟用篩選，則進行篩選 ---
         if ENABLE_FILTER:
             logging.info(f"--- 篩選證券代號: {STOCK_CODES_TO_FILTER} ---")
             market_data_list = filter_stocks_by_codes(market_data_list, STOCK_CODES_TO_FILTER)
         
-        print(f"\n[結果] 抓取成功！總共 {len(market_data_list)} 支股票。")
+        # (日誌) [結果] ...
+        logging.info(f"\n[結果] 抓取成功！總共 {len(market_data_list)} 支股票。")
         
         if ENABLE_FILTER:
-            print(f"--- 顯示篩選後的資料 (證券代號: {STOCK_CODES_TO_FILTER}) ---")
+            logging.info(f"--- 顯示篩選後的資料 (證券代號: {STOCK_CODES_TO_FILTER}) ---")
         else:
-            print(f"--- 顯示全部資料 ---")
+            logging.info(f"--- 顯示全部資料 ---")
         
-        # --- 3.2 按照漲跌價差排序（可選） ---
+        # --- 4.2 按照漲跌價差排序（可選） ---
         if SORT_BY_CHANGE:
             market_data_list = sort_by_change(market_data_list, reverse=SORT_REVERSE)
         
-        # 顯示所有欄位名稱
+        # --- 4.3 [新] 儲存資料到 CSV ---
+        try:
+            # 決定儲存路徑 (存在 '盤後資訊' 資料夾的上一層, 即專案根目錄下的 'output_csv' 資料夾中)
+            script_dir = os.path.dirname(__file__)
+            project_root = os.path.abspath(os.path.join(script_dir, '..'))
+            output_dir = os.path.join(project_root, 'output_csv')
+            
+            save_data_to_csv(market_data_list, output_dir)
+            
+        except Exception as e:
+            logging.error(f"[Main] 呼叫 save_data_to_csv 時發生錯誤: {e}", exc_info=True)
+
+        
+        # --- 4.4 輸出到控制台 (print) ---
+        # (這部分使用 print 輸出到控制台，logging 僅用於日誌檔案)
         if market_data_list:
             print(f"\n所有欄位名稱: {list(market_data_list[0].keys())}")
             print(f"\n{'='*80}")
