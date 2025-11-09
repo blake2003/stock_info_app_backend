@@ -7,3 +7,9 @@
 # 忽略 Python 產生的快取檔案
 __pycache__/
 *.pyc
+
+# 忽略日誌檔案資料夾
+logs/
+
+# 忽略輸出 CSV 檔案資料夾
+output_csv/
