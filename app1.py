@@ -43,16 +43,15 @@ def fetch_stock_data_safely(stock_id, start_str, end_str):
     """
     安全抓取歷史數據，包含瀏覽器標頭偽裝與快取機制
     """
-    # 建立一個網路連線 Session
-    session = requests.Session()
-    # 填入標準的 User-Agent，讓伺服器以為我們是一台正常的 Mac 電腦上的 Chrome 瀏覽器
-    session.headers.update({
-        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-    })
-    
-    ticker_obj = yf.Ticker(stock_id, session=session)
+    # 🚨 修正新版 yfinance 機制：不再手動設定與傳入 requests.Session()，直接讓 YF 內部自行處理安全連線
+    ticker_obj = yf.Ticker(stock_id)
     data = ticker_obj.history(start=start_str, end=end_str, auto_adjust=True)
     return data
+
+# 💡 【新增控制】側邊欄參數最佳化按鈕
+st.sidebar.divider()
+st.sidebar.subheader("🎯 尋找黃金參數組合")
+opt_button = st.sidebar.button("🔍 執行策略參數最佳化 (網格搜尋)")
 
 if st.sidebar.button("🚀 開始運行回測"):
     with st.spinner("📡 正在安全抓取歷史數據並進行矩陣運算..."):
@@ -167,3 +166,109 @@ if st.sidebar.button("🚀 開始運行回測"):
             fig.update_yaxes(title_text="RSI 數值", row=2, col=1)
             
             st.plotly_chart(fig, use_container_width=True)
+
+# 🚨 【全新加深玩法】網格搜尋邏輯區塊
+if opt_button:
+    with st.spinner("⚙️ 正在高速窮舉所有參數組合並進行壓力測試..."):
+        start_str = start_date.strftime('%Y-%m-%d')
+        end_str = end_date.strftime('%Y-%m-%d')
+        
+        try:
+            # 充分利用安全快取調閱數據
+            base_df = fetch_stock_data_safely(full_stock_id, start_str, end_str)
+        except Exception as e:
+            st.error(f"網格搜尋抓取資料失敗: {e}")
+            st.stop()
+            
+        if base_df.empty:
+            st.error("❌ 無法讀取資料進行最佳化。")
+            st.stop()
+            
+        base_df.index = pd.to_datetime(base_df.index).tz_localize(None)
+        
+        # 定義我們要窮舉搜尋的參數網格 (可根據電腦效能彈性增減)
+        fast_ranges = [5, 10, 15]
+        slow_ranges = [20, 50, 60]
+        rsi_ranges = [60, 65, 70] if rsi_filter_enabled else [65]
+        
+        optimization_results = []
+        
+        # 使用多層迴圈進行網格窮舉
+        for f_ma in fast_ranges:
+            for s_ma in slow_ranges:
+                if f_ma >= s_ma: # 確保快線天數一定小於慢線天數
+                    continue
+                for r_th in rsi_ranges:
+                    
+                    # 建立暫存副本以防干擾主畫面資料
+                    temp_df = base_df.copy()
+                    temp_df['Fast_MA'] = temp_df['Close'].rolling(window=f_ma).mean()
+                    temp_df['Slow_MA'] = temp_df['Close'].rolling(window=s_ma).mean()
+                    
+                    # 快速重算 RSI
+                    t_delta = temp_df['Close'].diff()
+                    t_gain = (t_delta.where(t_delta > 0, 0)).rolling(window=rsi_period).mean()
+                    t_loss = (-t_delta.where(t_delta < 0, 0)).rolling(window=rsi_period).mean()
+                    t_rs = t_gain / t_loss.replace(0, np.nan)
+                    temp_df['RSI'] = 100 - (100 / (1 + t_rs))
+                    temp_df['RSI'] = temp_df['RSI'].fillna(50)
+                    
+                    temp_df = temp_df.dropna(subset=['Fast_MA', 'Slow_MA']).copy()
+                    
+                    # 計算訊號
+                    t_ma_cross = np.where(temp_df['Fast_MA'] > temp_df['Slow_MA'], 1, 0)
+                    t_signals = []
+                    t_curr = 0
+                    for k in range(len(temp_df)):
+                        t_rsi_cond = (not rsi_filter_enabled) or (temp_df['RSI'].iloc[k] < r_th)
+                        if t_ma_cross[k] == 1 and t_rsi_cond:
+                            t_curr = 1
+                        elif t_ma_cross[k] == 0:
+                            t_curr = 0
+                        t_signals.append(t_curr)
+                        
+                    temp_df['Signal'] = t_signals
+                    temp_df['Position'] = temp_df['Signal'].diff()
+                    
+                    # 計算扣除交易成本之損益
+                    temp_df['Market_Return'] = temp_df['Close'].pct_change()
+                    temp_df['Raw_Strategy_Return'] = temp_df['Signal'].shift(1) * temp_df['Market_Return']
+                    
+                    temp_df['Cost'] = 0.0
+                    temp_df.loc[temp_df['Position'] == 1, 'Cost'] = fee_rate
+                    temp_df.loc[temp_df['Position'] == -1, 'Cost'] = fee_rate + tax_rate
+                    temp_df['Strategy_Return'] = temp_df['Raw_Strategy_Return'] - temp_df['Cost']
+                    
+                    # 統計指標結果
+                    t_cum_wealth = (1 + temp_df['Strategy_Return'].fillna(0)).cumprod()
+                    if len(t_cum_wealth) == 0: continue
+                    
+                    t_total_return = (t_cum_wealth.iloc[-1] - 1) * 100
+                    
+                    # 計算夏普值
+                    t_ret_std = temp_df['Strategy_Return'].std()
+                    t_sharpe = (temp_df['Strategy_Return'].mean() / t_ret_std) * np.sqrt(252) if t_ret_std != 0 else 0
+                    
+                    # 計算最大回撤 MDD
+                    t_mdd = ((t_cum_wealth - t_cum_wealth.cummax()) / t_cum_wealth.cummax()).min() * 100
+                    
+                    # 將本次組合結果記錄下來
+                    optimization_results.append({
+                        "快線天數 (Fast MA)": f_ma,
+                        "慢線天數 (Slow MA)": s_ma,
+                        "買入 RSI 上限": r_th if rsi_filter_enabled else "未啟用",
+                        "策略累積總報酬率": f"{t_total_return:.2f}%",
+                        "年化夏普值": round(t_sharpe, 2),
+                        "歷史最大回撤 (MDD)": f"{t_mdd:.2f}%",
+                        "排序用報酬率": t_total_return # 用於後續背後排序
+                    })
+                    
+        # 轉化成資料表並呈現在網頁前台
+        opt_df = pd.DataFrame(optimization_results)
+        if not opt_df.empty:
+            opt_df = opt_df.sort_values(by="排序用報酬率", ascending=False).drop(columns=["排序用報酬率"])
+            
+            st.success("🏆 網格搜尋完成！以下已為您篩選出最賺錢的黃金參數排行榜：")
+            st.dataframe(opt_df, use_container_width=True)
+        else:
+            st.warning("無符合篩選條件的參數組合。")
