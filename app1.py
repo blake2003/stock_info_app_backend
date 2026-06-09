@@ -5,6 +5,8 @@ import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
+import requests
+
 # 1. 網頁基本設定
 st.set_page_config(page_title="台股進階量化回測儀表板", layout="wide")
 st.title("🛡️ 台股進階量化回測系統 (歷史資料相容優化版)")
@@ -36,6 +38,22 @@ tax_rate = 0.001 if is_etf else 0.003              # 賣出才要的證交稅
 # 處理台股代碼後綴
 full_stock_id = f"{stock_code}.TW" if not stock_code.endswith(('.TW', '.TWO')) else stock_code
 
+@st.cache_data(ttl=3600)
+def fetch_stock_data_safely(stock_id, start_str, end_str):
+    """
+    安全抓取歷史數據，包含瀏覽器標頭偽裝與快取機制
+    """
+    # 建立一個網路連線 Session
+    session = requests.Session()
+    # 填入標準的 User-Agent，讓伺服器以為我們是一台正常的 Mac 電腦上的 Chrome 瀏覽器
+    session.headers.update({
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    })
+    
+    ticker_obj = yf.Ticker(stock_id, session=session)
+    data = ticker_obj.history(start=start_str, end=end_str, auto_adjust=True)
+    return data
+
 if st.sidebar.button("🚀 開始運行回測"):
     with st.spinner("📡 正在安全抓取歷史數據並進行矩陣運算..."):
         
@@ -45,17 +63,16 @@ if st.sidebar.button("🚀 開始運行回測"):
         
         # 🚨 【模式優化】改用 yf.Ticker().history 模式，避開 download 帶來的 MultiIndex 陷阱
         try:
-            ticker_obj = yf.Ticker(full_stock_id)
-            # auto_adjust=True 會讓 'Close' 欄位自動變成還原股價（等同於 Adj Close）
-            df = ticker_obj.history(start=start_str, end=end_str, auto_adjust=True)
+            df = fetch_stock_data_safely(full_stock_id, start_str, end_str)
         except Exception as e:
             st.error(f"連線至 Yahoo Finance 發生錯誤: {e}")
-            df = pd.DataFrame()
+            st.stop()
         
         if df.empty:
-            st.error(f"❌ 找不到 {full_stock_id} 的資料。請確認此代碼在該時間範圍內是否有交易紀錄。")
+            st.error(f"❌ 暫時無法從 Yahoo 取得資料（可能目前封鎖尚未解除）。請等幾分鐘後重試，或嘗試更換其他股票代碼觸發快取更新。")
+            st.stop()
         else:
-            # 確保索引是時區無關的 DatetimeIndex，避免畫圖時格式衝突
+            # 確保索引格式正確
             df.index = pd.to_datetime(df.index).tz_localize(None)
                 
             # 🚨 這裡的所有 'Adj Close' 全部更換為穩定的 'Close'
