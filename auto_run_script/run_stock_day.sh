@@ -10,9 +10,13 @@
 # 5. 執行 stock_day.py 腳本。
 # 6. 將所有執行訊息 (stdout) 和錯誤訊息 (stderr) 附加到日誌檔。
 
+echo "--- $(date) ---" >> "$LOG_FILE"
+
 # 取得腳本所在的目錄 (也就是專案根目錄)
+SCRIPT_DIR=$(dirname "$(realpath "$0")")
+
 # (使用 realpath 確保解析了軟連結)
-BASE_DIR=$(dirname "$(realpath "$0")")
+BASE_DIR=$(realpath "$SCRIPT_DIR/..")
 
 # 定義日誌檔案路徑 (範例：放在專案根目錄下的 logs 資料夾)
 LOG_DIR="$BASE_DIR/logs/sh_log"

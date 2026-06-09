@@ -10,8 +10,11 @@
 echo "--- $(date) ---"
 echo "開始清除日誌腳本..."
 
+# 取得此腳本所在的目錄 (e.g., ~/stock_info_app_backend/auto_run_script)
+SCRIPT_DIR=$(dirname "$(realpath "$0")")
+
 # 取得腳本所在的目錄 (也就是專案根目錄)
-BASE_DIR=$(dirname "$(realpath "$0")")
+BASE_DIR=$(realpath "$SCRIPT_DIR/..")
 
 # 定義日誌檔案路徑
 LOG_DIR="$BASE_DIR/logs"

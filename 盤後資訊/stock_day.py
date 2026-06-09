@@ -56,10 +56,12 @@ SORT_REVERSE = True    # True = 遞減排序（漲幅最大在前），False = �
 
 
 
-# 從 funtion 資料夾導入篩選和排序功能
+# 從 funtion 資料夾導入篩選、排序、日誌設置和 CSV 儲存功能
 try:
     # 從 funtion 資料夾導入功能
     from funtion.stock_filter import filter_stocks_by_codes, sort_by_change
+    from funtion.logger_config import setup_logger
+    from funtion.csv_saver import save_data_to_csv, get_output_dir
 except ImportError:
     # 如果導入失敗，嘗試相對路徑
     # (當作主程式執行時，__file__ 會是 '盤後資訊/stock_day.py'，
@@ -67,21 +69,12 @@ except ImportError:
     # '..' 會往上一層到專案根目錄)
     sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
     from funtion.stock_filter import filter_stocks_by_codes, sort_by_change
+    from funtion.logger_config import setup_logger
+    from funtion.csv_saver import save_data_to_csv, get_output_dir
 
 # --- 1. 設置日誌 ---
 # (日誌僅寫入檔案，不輸出到控制台)
-# 決定日誌檔案路徑 (存在專案根目錄下)
-script_dir = os.path.dirname(__file__)
-project_root = os.path.abspath(os.path.join(script_dir, '..'))
-log_dir = os.path.join(project_root, 'logs', 'csv_log')
-os.makedirs(log_dir, exist_ok=True)
-log_file = os.path.join(log_dir, f'stock_day_{datetime.now().strftime("%Y%m%d")}.log')
-
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(module)s - %(message)s',
-    handlers=[logging.FileHandler(log_file, encoding='utf-8')]
-)
+setup_logger('stock_day', log_subdir='csv_log')
 
 # --- 2. 抓取全市場資料 ---
 def fetch_twse_market_day_all_csv() -> Optional[List[Dict[str, Any]]]:
@@ -236,71 +229,7 @@ def fetch_twse_market_day_all_csv() -> Optional[List[Dict[str, Any]]]:
         
     return None
 
-# --- 3. [新] 儲存資料到 CSV ---
-def save_data_to_csv(data_list: List[Dict[str, Any]], output_dir: str):
-    """
-    將處理過的資料儲存為 CSV 檔案。
-    檔案將儲存在指定的 output_dir 中，並以當天日期命名。
-    """
-    if not data_list:
-        logging.warning("[CSV Save] 沒有資料可儲存。")
-        return
-
-    try:
-        # --- 3.1 決定檔案名稱 ---
-        # 嘗試從資料中獲取日期
-        date_str = data_list[0].get('日期', '').strip()
-        if date_str:
-            # 轉換民國年 (e.g., 113/11/08) 為西元年 (e.g., 2024-11-08)
-            try:
-                parts = date_str.split('/')
-                roc_year = int(parts[0])
-                month = int(parts[1])
-                day = int(parts[2])
-                year = roc_year + 1911
-                file_date_str = f"{year}-{month:02d}-{day:02d}"
-            except Exception:
-                # 如果日期格式解析失敗，退回使用今天的日期
-                logging.warning(f"[CSV Save] 無法解析資料日期 '{date_str}'，將使用今天日期命名。")
-                file_date_str = datetime.now().strftime('%Y-%m-%d')
-        else:
-            # 如果沒有日期欄位，使用今天的日期
-            logging.warning("[CSV Save] 資料中無日期欄位，將使用今天日期命名。")
-            file_date_str = datetime.now().strftime('%Y-%m-%d')
-
-        filename = f"stock_day_{file_date_str}.csv"
-        
-        # --- 3.2 建立資料夾並組合路徑 ---
-        os.makedirs(output_dir, exist_ok=True)
-        filepath = os.path.join(output_dir, filename)
-
-        # --- 3.3 寫入 CSV ---
-        # 取得所有欄位名稱 (以第一筆資料為準)
-        headers = list(data_list[0].keys())
-        
-        logging.info(f"[CSV Save] 準備寫入資料至: {filepath}")
-        
-        with open(filepath, 'w', newline='', encoding='utf-8-sig') as f:
-            # 使用 DictWriter 寫入字典列表
-            writer = csv.DictWriter(f, fieldnames=headers)
-            
-            # 寫入標頭
-            writer.writeheader()
-            
-            # 寫入所有資料
-            writer.writerows(data_list)
-
-        logging.info(f"[CSV Save] ✓ 成功將 {len(data_list)} 筆資料儲存至 {filepath}")
-
-    except csv.Error as csv_err:
-        logging.error(f"[CSV Save Error] 寫入 CSV 失敗: {csv_err}")
-    except IOError as io_err:
-        logging.error(f"[CSV Save Error] 檔案寫入錯誤: {io_err}")
-    except Exception as e:
-        logging.error(f"[CSV Save Error] 儲存 CSV 時發生未預期錯誤: {e}", exc_info=True)
-
-
-# --- 4. 執行主程式 ---
+# --- 3. 執行主程式 ---
 if __name__ == "__main__":
     
     # ============================================
@@ -332,14 +261,17 @@ if __name__ == "__main__":
         if SORT_BY_CHANGE:
             market_data_list = sort_by_change(market_data_list, reverse=SORT_REVERSE)
         
-        # --- 4.3 [新] 儲存資料到 CSV ---
+        # --- 4.3 儲存資料到 CSV ---
         try:
-            # 決定儲存路徑 (存在 '盤後資訊' 資料夾的上一層, 即專案根目錄下的 'output_csv' 資料夾中)
-            script_dir = os.path.dirname(__file__)
-            project_root = os.path.abspath(os.path.join(script_dir, '..'))
-            output_dir = os.path.join(project_root, 'output_csv')
+            # 決定儲存路徑 (存在專案根目錄下的 'output_csv' 資料夾中)
+            output_dir = get_output_dir(__file__, subdir='output_csv')
             
-            save_data_to_csv(market_data_list, output_dir)
+            save_data_to_csv(
+                market_data_list, 
+                output_dir, 
+                filename_prefix='stock_day',
+                date_field='日期'
+            )
             
         except Exception as e:
             logging.error(f"[Main] 呼叫 save_data_to_csv 時發生錯誤: {e}", exc_info=True)
